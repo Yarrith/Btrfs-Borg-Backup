@@ -1,0 +1,4 @@
+#!/bin/bash
+export BORG_PASSPHRASE="INSERT PASSPHRASE" 
+borg create --stats /dir/to/borgrepo/::btrfs-backup-{now:%Y-%m-%d_%H-%M} /.btrfs
+borg prune -v --list --keep-daily 7 --keep-weekly 4 --keep-monthly 6 /dir/to/borgrepo && borg compact /dir/to/borgrepo

@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# Configuration: Array of source subvolumes to snapshot
+SOURCE_DIRS=(
+    "/var"
+    "/home"
+    # Add more paths here, e.g., "/srv", "/var/lib", "/data"
+)
+
+# Snapshot destination base directory
+SNAPSHOT_BASE="/.btrfs"
+
+# Retention period in days
+RETENTION_DAYS=7
+
+# Get current date
+CURRENT_DATE=$(date +%Y-%m-%d)
+
+# Calculate cutoff date for cleanup (ISO format allows lexicographical comparison)
+CUTOFF_DATE=$(date -d "$RETENTION_DAYS days ago" +%Y-%m-%d)
+
+# Helper: Convert path to snapshot prefix.
+# /var -> "var", /var/lib -> "var-lib", / -> "root"
+get_snapshot_prefix() {
+    local path="$1"
+    if [ "$path" = "/" ]; then
+        echo "root"
+    else
+        # Remove leading slash, replace remaining slashes with dashes
+        echo "$path" | sed 's|^/||; s|/|-|g'
+    fi
+}
+
+# --- Pre-flight checks ---
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run as root."
+    exit 1
+fi
+
+if [ ! -d "$SNAPSHOT_BASE" ]; then
+    echo "Error: Destination directory $SNAPSHOT_BASE does not exist."
+    exit 1
+fi
+
+echo "=== Snapshot date: $CURRENT_DATE ==="
+
+# --- Snapshot Creation ---
+
+for SOURCE_DIR in "${SOURCE_DIRS[@]}"; do
+    # Verify source exists and is a btrfs subvolume
+    if [ ! -d "$SOURCE_DIR" ]; then
+        echo "Warning: Source '$SOURCE_DIR' not found, skipping."
+        continue
+    fi
+
+    if ! btrfs subvolume show "$SOURCE_DIR" >/dev/null 2>&1; then
+        echo "Warning: '$SOURCE_DIR' is not a btrfs subvolume, skipping."
+        continue
+    fi
+
+    # Construct snapshot name: prefix-YYYY-MM-DD
+    SNAP_PREFIX=$(get_snapshot_prefix "$SOURCE_DIR")
+    SNAPSHOT_NAME="${SNAP_PREFIX}-${CURRENT_DATE}"
+    SNAPSHOT_PATH="${SNAPSHOT_BASE}/${SNAPSHOT_NAME}"
+
+    # Skip if snapshot already exists for this subvolume today
+    if [ -e "$SNAPSHOT_PATH" ]; then
+        echo "Snapshot already exists for $SOURCE_DIR ($SNAPSHOT_NAME), skipping."
+        continue
+    fi
+
+    # Create snapshot
+    echo "Creating snapshot for $SOURCE_DIR..."
+    if btrfs subvolume snapshot "$SOURCE_DIR" "$SNAPSHOT_PATH"; then
+        echo "  Created: $SNAPSHOT_PATH"
+    else
+        echo "  Failed to create snapshot for $SOURCE_DIR"
+    fi
+done
+
+# --- Snapshot Cleanup ---
+
+echo ""
+echo "=== Cleanup: removing snapshots older than $CUTOFF_DATE ==="
+
+deleted_count=0
+for snap_path in "$SNAPSHOT_BASE"/*; do
+    [ -e "$snap_path" ] || continue
+
+    snap_name=$(basename "$snap_path")
+
+    # Match date suffix: PREFIX-YYYY-MM-DD
+    if [[ "$snap_name" =~ -([0-9]{4}-[0-9]{2}-[0-9]{2})$ ]]; then
+        snap_date="${BASH_REMATCH[1]}"
+
+        # Lexicographical comparison works for ISO dates
+        if [[ "$snap_date" < "$CUTOFF_DATE" ]]; then
+            echo "Deleting old snapshot: $snap_name (date: $snap_date)"
+            if btrfs subvolume delete "$snap_path" 2>/dev/null; then
+                ((deleted_count++))
+            else
+                echo "  Error: failed to delete $snap_name"
+            fi
+        fi
+    fi
+done
+
+echo "Cleanup finished. Deleted $deleted_count snapshots."
