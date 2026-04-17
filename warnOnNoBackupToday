@@ -1,0 +1,92 @@
+#!/bin/bash
+
+# currently setup to use STARTTLS since this is my usecase
+
+# ============================================
+# CONFIGURATION - EDIT THESE VARIABLES
+# ============================================
+BORG_REPO="/path/to/your/borg/repo"  # Path to borg repository
+SMTP_HOST="smtp.domain.com"
+SMTP_PORT="587"
+SMTP_USER="backup@domain.com"
+SMTP_PASS="your-smtp-password-here" 
+TO_EMAIL="admin@example.com"  # <-- Recipient address
+
+# ============================================
+# DERIVED VALUES
+# ============================================
+TODAY=$(date +%Y-%m-%d)
+REPO_NAME=$(basename "$BORG_REPO")
+
+# ============================================
+# FUNCTIONS
+# ============================================
+
+# Check if a backup exists for today (YYYY-MM-DD)
+check_todays_backup() {
+    # Borg list outputs timestamps in ISO format: 2026-04-17T12:34:56...
+    # We check if any line starts with today's date
+    borg list "$BORG_REPO" --format="{time} {name}{NL}" | \
+        grep "${TODAY}"
+    return $?
+}
+
+# Send warning email using OpenSSL with STARTTLS
+send_warning_email() {
+    local subject="Warning: No Backup"
+    local body="warning: no backup for ${REPO_NAME} on ${TODAY}"
+
+    # Build email headers and body
+    local email_data="Subject: ${subject}
+From: ${SMTP_USER}
+To: ${TO_EMAIL}
+Date: $(date -R)
+
+${body}"
+
+    # Create base64 encoded AUTH PLAIN string (\0user\0pass)
+    local auth_plain
+    auth_plain=$(printf '\0%s\0%s' "$SMTP_USER" "$SMTP_PASS" | base64 | tr -d '\n')
+
+    # Send SMTP commands through OpenSSL with STARTTLS
+    {
+        sleep 2
+        echo "EHLO $(hostname -f)"
+        sleep 1
+        echo "AUTH PLAIN ${auth_plain}"
+        sleep 1
+        echo "MAIL FROM: <${SMTP_USER}>"
+        sleep 1
+        echo "RCPT TO: <${TO_EMAIL}>"
+        sleep 1
+        echo "DATA"
+        sleep 1
+        echo "${email_data}"
+        echo "."
+        sleep 1
+        echo "QUIT"
+    } | openssl s_client -connect ${SMTP_HOST}:${SMTP_PORT} -starttls smtp -crlf -quiet 2>/dev/null | \
+        grep -E "(235|250|354|221)" > /dev/null
+
+    if [ $? -eq 0 ]; then
+        echo "Warning email sent successfully to ${TO_EMAIL}"
+        return 0
+    else
+        echo "Failed to send warning email" >&2
+        return 1
+    fi
+}
+
+# ============================================
+# MAIN EXECUTION
+# ============================================
+
+if ! check_todays_backup; then
+    echo "No backup found for ${REPO_NAME} on ${TODAY} - sending warning email..."
+    send_warning_email
+    exit 1
+else
+    echo "Backup verified for ${REPO_NAME} on ${TODAY}"
+    exit 0
+fi
+
